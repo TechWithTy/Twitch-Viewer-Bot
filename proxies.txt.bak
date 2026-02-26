@@ -1,0 +1,33 @@
+# ─── Twitch Viewer Bot — Proxy List ───
+# Validated working proxies (as of 2026-02-25)
+# Only HTTPS-capable anonymous proxies that passed connectivity test
+
+# Italy - anonymous, HTTPS
+http://104.238.30.58:63744
+http://104.238.30.45:59741
+http://104.238.30.86:63900
+http://104.238.30.37:59741
+http://104.238.30.91:63900
+http://104.238.30.40:59741
+http://104.238.30.38:59741
+http://104.238.30.39:59741
+http://104.238.30.63:63744
+http://104.238.30.68:63744
+http://104.238.30.50:59741
+
+# France
+http://178.170.43.106:8081
+
+# US
+http://72.56.59.17:61931
+http://72.56.59.56:63127
+
+# Indonesia - elite, HTTPS
+http://202.152.44.18:8081
+http://202.152.44.19:8081
+
+# Add more working proxies below:
+# Get fresh proxies from:
+#   https://www.sslproxies.org/
+#   https://free-proxy-list.net/
+# Format: http://ip:port

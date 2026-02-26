@@ -5,7 +5,7 @@ No extra dependencies beyond Python's built-in tkinter.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import threading
 import subprocess
 import shutil
@@ -37,8 +37,8 @@ BTN_SETUP     = "#3d2d6b"
 BTN_SETUP_HVR = "#5a45a0"
 
 # ─── RAM detection (Windows, zero dependencies) ────────────────────────
-MB_PER_TAB = 75  # approx headless Chrome tab memory
-RAM_USAGE_RATIO = 0.70  # use at most 70% of *available* RAM
+MB_PER_INSTANCE = 150  # each viewer = separate Chrome process (~150 MB)
+RAM_USAGE_RATIO = 0.60  # use at most 60% of *available* RAM
 
 
 def get_system_ram():
@@ -69,17 +69,17 @@ def get_system_ram():
 def suggest_viewers(avail_mb):
     """Recommend a viewer count based on available RAM."""
     if avail_mb is None:
-        return 30  # safe fallback
+        return 10  # safe fallback
     usable = int(avail_mb * RAM_USAGE_RATIO)
-    suggested = max(5, usable // MB_PER_TAB)
-    return min(suggested, 300)  # hard cap
+    suggested = max(3, usable // MB_PER_INSTANCE)
+    return min(suggested, 50)  # hard cap for separate instances
 
 
 def max_viewers(avail_mb):
     """Absolute max viewers before likely OOM."""
     if avail_mb is None:
-        return 200
-    return max(10, int(avail_mb * 0.90) // MB_PER_TAB)
+        return 30
+    return max(5, int(avail_mb * 0.80) // MB_PER_INSTANCE)
 
 
 # ─── Environment checks ────────────────────────────────────────────────
@@ -131,7 +131,7 @@ class TwitchBotGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Twitch Viewer Bot")
-        self.geometry("560x920")
+        self.geometry("560x1060")
         self.resizable(False, False)
         self.configure(bg=BG_DARK)
 
@@ -180,7 +180,21 @@ class TwitchBotGUI(tk.Tk):
             state="readonly", font=("Segoe UI", 11)
         )
         self.proxy_combo.current(0)
-        self.proxy_combo.pack(fill="x", padx=16, pady=(0, 10))
+        self.proxy_combo.pack(fill="x", padx=16, pady=(0, 4))
+
+        # Auto-rotate checkbox
+        self.rotate_var = tk.BooleanVar(value=True)
+        rotate_cb = tk.Checkbutton(
+            card, text="Auto-rotate: cycle healthy proxies "
+            "for each viewer",
+            variable=self.rotate_var,
+            font=("Segoe UI", 9), fg=FG_TEXT,
+            bg=BG_PANEL, selectcolor=BG_INPUT,
+            activebackground=BG_PANEL,
+            activeforeground=FG_TEXT,
+            anchor="w", cursor="hand2"
+        )
+        rotate_cb.pack(fill="x", padx=16, pady=(0, 10))
 
         # --- Channel name ---
         tk.Label(card, text="CHANNEL NAME", font=("Segoe UI", 9, "bold"),
@@ -246,9 +260,12 @@ class TwitchBotGUI(tk.Tk):
         self.viewer_scale.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         # tip
-        tk.Label(card, text="💡 Tip: set ~50% more than desired (e.g. 30 to get ~20)",
+        tk.Label(card, text="\U0001f4a1 Tip: set ~50% more than desired (e.g. 30 to get ~20)",
                  font=("Segoe UI", 8), fg=FG_DIM, bg=BG_PANEL,
                  anchor="w").pack(fill="x", padx=16, pady=(0, 12))
+
+        # ── Proxy management card ────────────────────────────────────────
+        self._build_proxy_card()
 
         # ── Action buttons ──────────────────────────────────────────────
         btn_frame = tk.Frame(self, bg=BG_DARK)
@@ -420,12 +437,9 @@ class TwitchBotGUI(tk.Tk):
             url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
             dest = os.path.join(os.environ.get("TEMP", "."), "python_installer.exe")
             self._log(f"   Saving to {dest}")
-            # Download with PowerShell (built-in on Windows)
-            subprocess.run(
-                ["powershell", "-Command",
-                 f"Invoke-WebRequest -Uri '{url}' -OutFile '{dest}'"],
-                check=True, capture_output=True
-            )
+            # Download using Python's built-in urllib (no powershell needed)
+            import urllib.request
+            urllib.request.urlretrieve(url, dest)
             self._log("✅ Download complete. Launching installer...")
             self._log("   ⚠ IMPORTANT: Check 'Add Python to PATH' in the installer!")
             subprocess.Popen([dest, "InstallAllUsers=0", "PrependPath=1",
@@ -485,7 +499,25 @@ class TwitchBotGUI(tk.Tk):
                 )
                 from webdriver_manager.chrome import ChromeDriverManager
 
-            path = ChromeDriverManager().install()
+            # Detect Chrome version from filesystem
+            from bot_engine import ViewerBot
+            chrome_ver = ViewerBot._detect_chrome_version()
+            if chrome_ver:
+                self._log(f"   Detected Chrome {chrome_ver}")
+                raw_path = ChromeDriverManager(driver_version=chrome_ver).install()
+            else:
+                raw_path = ChromeDriverManager().install()
+
+            # Find actual chromedriver.exe (webdriver-manager may return wrong file)
+            path = raw_path
+            if not raw_path.endswith("chromedriver.exe"):
+                search_dir = os.path.dirname(raw_path)
+                for root, dirs, files in os.walk(search_dir):
+                    for f in files:
+                        if f == "chromedriver.exe":
+                            path = os.path.join(root, f)
+                            break
+
             self._log(f"✅ ChromeDriver ready at:\n   {path}")
             self.after(0, lambda: [
                 self._cd_btn.config(state="disabled", text="Installed ✔"),
@@ -526,41 +558,243 @@ class TwitchBotGUI(tk.Tk):
             self.log_box.config(state="disabled")
         self.after(0, _append)
 
+    # ── Proxy management card ────────────────────────────────────────────
+    def _build_proxy_card(self):
+        """Build the proxy paste/load panel."""
+        card = tk.Frame(self, bg=BG_PANEL, bd=0,
+                        highlightthickness=1,
+                        highlightbackground="#3d2d6b")
+        card.pack(fill="x", padx=28, pady=(6, 8))
+
+        # Header row
+        hdr = tk.Frame(card, bg=BG_PANEL)
+        hdr.pack(fill="x", padx=16, pady=(10, 2))
+
+        tk.Label(
+            hdr, text="PROXIES (optional)",
+            font=("Segoe UI", 9, "bold"),
+            fg=FG_DIM, bg=BG_PANEL, anchor="w"
+        ).pack(side="left")
+
+        self.proxy_count_lbl = tk.Label(
+            hdr, text="0 proxies",
+            font=("Segoe UI", 9),
+            fg=ACCENT, bg=BG_PANEL, anchor="e"
+        )
+        self.proxy_count_lbl.pack(side="right")
+
+        # Text area for pasting proxies
+        self.proxy_text = tk.Text(
+            card, height=5, font=("Consolas", 9),
+            bg=BG_INPUT, fg=FG_TEXT,
+            insertbackground=FG_TEXT, relief="flat", bd=0,
+            highlightthickness=1,
+            highlightbackground="#3d2d6b",
+            highlightcolor=ACCENT, wrap="word"
+        )
+        self.proxy_text.pack(
+            fill="x", padx=16, pady=(4, 6)
+        )
+        self.proxy_text.insert(
+            "1.0",
+            "# Paste proxies here (one per line)\n"
+            "# Format: http://ip:port or "
+            "socks5://ip:port\n"
+        )
+        self.proxy_text.bind(
+            "<KeyRelease>", lambda e: self._update_proxy_count()
+        )
+
+        # Button row
+        btn_row = tk.Frame(card, bg=BG_PANEL)
+        btn_row.pack(fill="x", padx=16, pady=(0, 10))
+
+        load_btn = tk.Button(
+            btn_row, text="\U0001f4c2  Load .txt",
+            font=("Segoe UI", 9),
+            bg=BTN_SETUP, fg=FG_TEXT,
+            activebackground=BTN_SETUP_HVR,
+            activeforeground="white",
+            relief="flat", cursor="hand2", bd=0,
+            command=self._load_proxy_file
+        )
+        load_btn.pack(side="left", padx=(0, 6))
+
+        save_btn = tk.Button(
+            btn_row, text="\U0001f4be  Save Proxies",
+            font=("Segoe UI", 9),
+            bg=BTN_SETUP, fg=FG_TEXT,
+            activebackground=BTN_SETUP_HVR,
+            activeforeground="white",
+            relief="flat", cursor="hand2", bd=0,
+            command=self._save_proxies
+        )
+        save_btn.pack(side="left", padx=(0, 6))
+
+        clear_btn = tk.Button(
+            btn_row, text="Clear",
+            font=("Segoe UI", 9),
+            bg="#3d1a1a", fg="#e0a0a0",
+            activebackground=DANGER,
+            activeforeground="white",
+            relief="flat", cursor="hand2", bd=0,
+            command=self._clear_proxies
+        )
+        clear_btn.pack(side="right")
+
+        # Load existing proxies.txt if present
+        self._load_existing_proxies()
+
+    def _load_existing_proxies(self):
+        """Pre-fill text area from proxies.txt if it exists."""
+        proxy_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "proxies.txt"
+        )
+        if os.path.isfile(proxy_path):
+            with open(proxy_path, "r") as f:
+                content = f.read().strip()
+            if content:
+                self.proxy_text.delete("1.0", "end")
+                self.proxy_text.insert("1.0", content)
+        self._update_proxy_count()
+
+    def _load_proxy_file(self):
+        """Open file dialog to load a .txt proxy list."""
+        path = filedialog.askopenfilename(
+            title="Select Proxy List",
+            filetypes=[
+                ("Text files", "*.txt"),
+                ("All files", "*.*")
+            ]
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r") as f:
+                content = f.read().strip()
+            self.proxy_text.delete("1.0", "end")
+            self.proxy_text.insert("1.0", content)
+            self._update_proxy_count()
+            self._log(f"Loaded proxies from: {path}")
+        except Exception as e:
+            messagebox.showerror(
+                "Load Error", f"Could not read file:\n{e}"
+            )
+
+    def _save_proxies(self):
+        """Save text area content to proxies.txt."""
+        content = self.proxy_text.get("1.0", "end").strip()
+        proxy_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "proxies.txt"
+        )
+        try:
+            with open(proxy_path, "w") as f:
+                f.write(content + "\n")
+            count = self._count_proxies(content)
+            self._log(
+                f"Saved {count} proxies to proxies.txt"
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Save Error",
+                f"Could not write proxies.txt:\n{e}"
+            )
+
+    def _clear_proxies(self):
+        """Clear the proxy text area."""
+        self.proxy_text.delete("1.0", "end")
+        self.proxy_text.insert(
+            "1.0",
+            "# Paste proxies here (one per line)\n"
+            "# Format: http://ip:port or "
+            "socks5://ip:port\n"
+        )
+        self._update_proxy_count()
+
+    def _count_proxies(self, text):
+        """Count non-comment, non-empty lines."""
+        count = 0
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                count += 1
+        return count
+
+    def _update_proxy_count(self):
+        """Update the proxy count label."""
+        content = self.proxy_text.get("1.0", "end")
+        count = self._count_proxies(content)
+        if count > 0:
+            self.proxy_count_lbl.config(
+                text=f"{count} proxies", fg=SUCCESS
+            )
+        else:
+            self.proxy_count_lbl.config(
+                text="no proxies (direct mode)",
+                fg=FG_DIM
+            )
+
     # ── Bot lifecycle ───────────────────────────────────────────────────
     def _on_launch(self):
         channel = self.channel_entry.get().strip()
-        if not channel or channel == getattr(self.channel_entry, '_ph', ''):
-            messagebox.showwarning("Missing info", "Please enter your Twitch channel name.")
+        if not channel or channel == getattr(
+            self.channel_entry, '_ph', ''
+        ):
+            messagebox.showwarning(
+                "Missing info",
+                "Please enter your Twitch channel name."
+            )
             return
 
-        proxy_idx = self.proxy_combo.current() + 1   # 1-based
+        # Auto-save proxies before launch
+        self._save_proxies()
+
+        # Get proxy selection & rotation setting
+        proxy_idx = self.proxy_combo.current() + 1
+        rotate = self.rotate_var.get()
         viewer_count = self.viewer_var.get()
 
         self.launch_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.status_var.set("Running...")
 
-        self._log(f"─── Session started ───")
+        proxy_name = PROXY_SERVERS.get(
+            proxy_idx, PROXY_SERVERS[1]
+        )[0]
+        self._log(f"--- Session started ---")
         self._log(f"Channel:  {channel}")
         self._log(f"Viewers:  {viewer_count}")
-        self._log(f"Proxy:    {proxy_idx}")
+        self._log(
+            f"Proxy:    {proxy_name} "
+            f"({'rotate' if rotate else 'fixed'})"
+        )
 
         self.bot = ViewerBot(
             proxy_id=proxy_idx,
             channel_name=channel,
             viewer_count=viewer_count,
-            on_status=self._log
+            on_status=self._log,
+            on_finish=self._on_bot_finished,
+            rotate_proxies=rotate
         )
         self.bot.start()
 
     def _on_stop(self):
         if self.bot:
+            self.status_var.set("Stopping...")
+            self.stop_btn.config(state="disabled")
             self.bot.stop()
+
+    def _on_bot_finished(self):
+        def _finish_ui():
             self.bot = None
-        self.launch_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-        self.status_var.set("Stopped")
-        self._log("─── Session ended ───\n")
+            self.launch_btn.config(state="normal")
+            self.stop_btn.config(state="disabled")
+            self.status_var.set("Stopped")
+            self._log("─── Session ended ───")
+        self.after(0, _finish_ui)
 
     def on_closing(self):
         if self.bot:
