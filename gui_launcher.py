@@ -6,18 +6,21 @@ No extra dependencies beyond Python's built-in tkinter.
 
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
+import os
+import sys
+import ctypes
+import struct
+import requests
 import threading
 import subprocess
 import shutil
-import sys
-import os
-import ctypes
-import struct
 
 # ── Ensure project root is on path ──────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bot_engine import PROXY_SERVERS, ViewerBot  # noqa: E402
+from bot_engine import (
+    PROXY_SERVERS, ViewerBot, fetch_proxies_from_url
+)  # noqa: E402
 
 # ─── Color palette ──────────────────────────────────────────────────────
 BG_DARK      = "#0e0b16"
@@ -583,6 +586,40 @@ class TwitchBotGUI(tk.Tk):
         )
         self.proxy_count_lbl.pack(side="right")
 
+        # Proxy URL Row
+        url_frame = tk.Frame(card, bg=BG_PANEL)
+        url_frame.pack(fill="x", padx=16, pady=(4, 6))
+        
+        tk.Label(
+            url_frame, text="Proxy URL:",
+            font=("Segoe UI", 8),
+            fg=FG_DIM, bg=BG_PANEL
+        ).pack(side="left")
+        
+        self.proxy_url_entry = tk.Entry(
+            url_frame, font=("Segoe UI", 9),
+            bg=BG_INPUT, fg=FG_TEXT,
+            insertbackground=FG_TEXT, relief="flat", bd=0,
+            highlightthickness=1,
+            highlightbackground="#3d2d6b",
+            highlightcolor=ACCENT
+        )
+        self.proxy_url_entry.pack(side="left", fill="x", expand=True, padx=6, ipady=2)
+        # Default pre-filled URL (Removing internal spaces if any were present)
+        self.proxy_url_entry.insert(0, "https://proxy.webshare.io/api/v2/proxy/list/download/geeshigwdghvjmswvafrobowkuygfmwcqtldxafu/-/any/username/direct/-/?plan_id=12870208")
+        
+        fetch_url_btn = tk.Button(
+            url_frame, text="Fetch",
+            font=("Segoe UI", 8, "bold"),
+            bg=ACCENT, fg="white",
+            activebackground=BTN_SETUP_HVR,
+            activeforeground="white",
+            relief="flat", cursor="hand2", bd=0,
+            padx=8,
+            command=self._fetch_proxies_now
+        )
+        fetch_url_btn.pack(side="right")
+
         # Text area for pasting proxies
         self.proxy_text = tk.Text(
             card, height=5, font=("Consolas", 9),
@@ -598,8 +635,7 @@ class TwitchBotGUI(tk.Tk):
         self.proxy_text.insert(
             "1.0",
             "# Paste proxies here (one per line)\n"
-            "# Format: http://ip:port or "
-            "socks5://ip:port\n"
+            "# Format: http://ip:port or user:pass:ip:port\n"
         )
         self.proxy_text.bind(
             "<KeyRelease>", lambda e: self._update_proxy_count()
@@ -736,6 +772,32 @@ class TwitchBotGUI(tk.Tk):
                 fg=FG_DIM
             )
 
+    def _fetch_proxies_now(self):
+        """Manually trigger proxy fetch from URL."""
+        url = self.proxy_url_entry.get().strip()
+        if not url:
+            messagebox.showinfo("Wait", "Please enter a Proxy URL first.")
+            return
+            
+        self.proxy_count_lbl.config(text="Fetching...", fg=ACCENT)
+        self.update_idletasks()
+        
+        plist = fetch_proxies_from_url(url)
+        if not plist:
+            self.proxy_count_lbl.config(text="Fetch failed", fg=DANGER)
+            messagebox.showerror("Error", "Failed to fetch proxies from URL.")
+            self._update_proxy_count() # revert label
+            return
+            
+        # Add to text area
+        self.proxy_text.delete("1.0", "end")
+        self.proxy_text.insert("1.0", "# Fetched from URL\n")
+        for p in plist:
+            self.proxy_text.insert("end", f"{p}\n")
+            
+        self._update_proxy_count()
+        messagebox.showinfo("Success", f"Loaded {len(plist)} proxies from URL.")
+
     # ── Bot lifecycle ───────────────────────────────────────────────────
     def _on_launch(self):
         channel = self.channel_entry.get().strip()
@@ -777,7 +839,8 @@ class TwitchBotGUI(tk.Tk):
             viewer_count=viewer_count,
             on_status=self._log,
             on_finish=self._on_bot_finished,
-            rotate_proxies=rotate
+            rotate_proxies=rotate,
+            proxy_url=self.proxy_url_entry.get().strip()
         )
         self.bot.start()
 

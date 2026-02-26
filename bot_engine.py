@@ -8,8 +8,11 @@ Optionally supports HTTP/SOCKS proxies via proxies.txt.
 
 import os
 import time
+import shutil
 import random
+import zipfile
 import warnings
+import requests
 import threading
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
@@ -68,10 +71,115 @@ def load_proxy_list(path=None):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if "://" not in line:
-                line = f"http://{line}"
-            proxies.append(line)
+            # Handle user:pass:ip:port or ip:port:user:pass or just ip:port
+            parts = line.split(":")
+            if len(parts) == 4:
+                # Common format: ip:port:user:pass
+                proxies.append(line)
+            else:
+                if "://" not in line:
+                    line = f"http://{line}"
+                proxies.append(line)
     return proxies
+
+
+def fetch_proxies_from_url(url):
+    """Fetch proxy list from a URL (e.g. Webshare)."""
+    if not url:
+        return []
+    # Remove all whitespace (including internal spaces/tabs if copy-pasted poorly)
+    url = "".join(url.split())
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
+        content = response.text
+        proxies = []
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            proxies.append(line)
+        return proxies
+    except Exception as e:
+        print(f"Failed to fetch proxies from URL: {e}")
+        return []
+
+
+def create_proxy_auth_extension(proxy_host, proxy_port,
+                                proxy_user, proxy_pass,
+                                scheme='http', plugin_path=None):
+    """
+    Create a Chrome extension to handle proxy authentication.
+    Chrome doesn't support 'user:pass@ip:port' in --proxy-server.
+    """
+    if plugin_path is None:
+        plugin_path = os.path.join(
+            os.environ.get('TEMP', os.getcwd()),
+            f'proxy_auth_plugin_{proxy_host}_{proxy_port}.zip'
+        )
+
+    manifest_json = """
+    {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Chrome Proxy",
+        "permissions": [
+            "proxy",
+            "tabs",
+            "unlimitedStorage",
+            "storage",
+            "<all_urls>",
+            "webRequest",
+            "webRequestBlocking"
+        ],
+        "background": {
+            "scripts": ["background.js"]
+        },
+        "minimum_chrome_version":"22.0.0"
+    }
+    """
+
+    background_js = """
+    var config = {
+            mode: "fixed_servers",
+            rules: {
+              singleProxy: {
+                scheme: "%s",
+                host: "%s",
+                port: parseInt(%s)
+              },
+              bypassList: ["foobar.com"]
+            }
+          };
+
+    chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+
+    function callbackFn(details) {
+        return {
+            authCredentials: {
+                username: "%s",
+                password: "%s"
+            }
+        };
+    }
+
+    chrome.webRequest.onAuthRequired.addListener(
+            callbackFn,
+            {urls: ["<all_urls>"]},
+            ['blocking']
+    );
+    """ % (scheme, proxy_host, proxy_port, proxy_user, proxy_pass)
+
+    with zipfile.ZipFile(plugin_path, 'w') as zp:
+        zp.writestr("manifest.json", manifest_json)
+        zp.writestr("background.js", background_js)
+
+    return plugin_path
 
 
 class ViewerBot:
@@ -79,14 +187,16 @@ class ViewerBot:
 
     def __init__(self, proxy_id, channel_name, viewer_count,
                  on_status=None, on_finish=None,
-                 rotate_proxies=False):
+                 rotate_proxies=False, proxy_url=None):
         self.proxy_id = proxy_id
         self.channel_name = channel_name.strip()
         self.viewer_count = viewer_count
         self.on_status = on_status or (lambda msg: None)
         self.on_finish = on_finish or (lambda: None)
         self.rotate_proxies = rotate_proxies
+        self.proxy_url = proxy_url
         self.drivers = []
+        self._temp_files = []
         self._stop_event = threading.Event()
 
     def _report(self, msg):
@@ -149,9 +259,10 @@ class ViewerBot:
                       instance_id=0):
         service = Service(driver_path)
         opts = webdriver.ChromeOptions()
-        opts.add_experimental_option(
-            "excludeSwitches", ["enable-logging"]
-        )
+        # Stealth: Remove automation flags and exclude logging
+        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        
         opts.add_argument("--disable-logging")
         opts.add_argument("--log-level=3")
         opts.add_argument("--headless=new")
@@ -165,7 +276,8 @@ class ViewerBot:
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-extensions")
+        # Headless=new supports extensions, so we don't disable them if we need them
+        # opts.add_argument("--disable-extensions") 
         opts.add_argument("--disable-background-networking")
         opts.add_argument("--disable-default-apps")
         opts.add_argument("--disable-sync")
@@ -173,8 +285,25 @@ class ViewerBot:
         opts.add_argument("--no-first-run")
 
         if proxy:
-            opts.add_argument(f"--proxy-server={proxy}")
+            # Handle user:pass:ip:port format
+            parts = proxy.split(":")
+            if len(parts) == 4:
+                # Common format: ip:port:user:pass
+                ip, port, user, pw = parts
+                plugin_path = create_proxy_auth_extension(
+                    ip, port, user, pw
+                )
+                opts.add_extension(plugin_path)
+                self._temp_files.append(plugin_path)
+            else:
+                opts.add_argument(f"--proxy-server={proxy}")
+            
             opts.add_argument("--ignore-certificate-errors")
+
+        # Load AdBlock if available
+        ext_path = os.path.join(os.getcwd(), 'adblock.crx')
+        if os.path.exists(ext_path):
+            opts.add_extension(ext_path)
 
         return webdriver.Chrome(service=service, options=opts)
 
@@ -422,14 +551,24 @@ class ViewerBot:
             self._report(f"ERROR: ChromeDriver failed.\n{e}")
             return
 
-        # Check for IP proxies from proxies.txt
-        ip_proxies = load_proxy_list()
+        # Check for proxy source: URL first, then local file
+        ip_proxies = []
+        if self.proxy_url:
+            self._report(f"Fetching proxies from URL: {self.proxy_url}")
+            ip_proxies = fetch_proxies_from_url(self.proxy_url)
+            if ip_proxies:
+                self._report(f"Successfully fetched {len(ip_proxies)} proxies!")
+            else:
+                self._report("Warning: Could not fetch from URL, checking proxies.txt")
+
+        if not ip_proxies:
+            ip_proxies = load_proxy_list()
+
         use_ip_proxies = len(ip_proxies) > 0
 
         if use_ip_proxies:
             self._report(
-                f"Found {len(ip_proxies)} IP proxies "
-                "in proxies.txt"
+                f"Found {len(ip_proxies)} IP proxies"
             )
             self._report(
                 "Each viewer gets a unique IP!"
@@ -557,3 +696,12 @@ class ViewerBot:
                 pass
         self.drivers.clear()
         self._report("Bot stopped -- all browsers closed.")
+
+        # Cleanup temp proxy extension files
+        for tmp in self._temp_files:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+        self._temp_files.clear()

@@ -117,6 +117,7 @@ def main():
         200,
     )
     rotate = input("Auto-rotate healthy proxies? (Y/n): ").strip().lower() != "n"
+    proxy_url = input("Enter Proxy URL (optional, e.g. Webshare): ").strip()
 
     os.system("cls")
     print_banner()
@@ -134,6 +135,7 @@ def main():
         viewer_count=viewer_count,
         on_status=print,
         rotate_proxies=rotate,
+        proxy_url=proxy_url
     )
     bot.start()
 

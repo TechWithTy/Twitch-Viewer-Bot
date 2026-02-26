@@ -1,2 +1,10 @@
-# Paste proxies here (one per line)
-# Format: http://ip:port or socks5://ip:port
+31.59.20.176:6754:uvhpyikh:o7kzfa3223uz
+23.95.150.145:6114:uvhpyikh:o7kzfa3223uz
+198.23.239.134:6540:uvhpyikh:o7kzfa3223uz
+45.38.107.97:6014:uvhpyikh:o7kzfa3223uz
+107.172.163.27:6543:uvhpyikh:o7kzfa3223uz
+198.105.121.200:6462:uvhpyikh:o7kzfa3223uz
+64.137.96.74:6641:uvhpyikh:o7kzfa3223uz
+216.10.27.159:6837:uvhpyikh:o7kzfa3223uz
+142.111.67.146:5611:uvhpyikh:o7kzfa3223uz
+23.26.53.37:6003:uvhpyikh:o7kzfa3223uz
